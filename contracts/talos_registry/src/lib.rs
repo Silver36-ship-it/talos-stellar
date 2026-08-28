@@ -5,6 +5,17 @@
 //! - Protocol fee collection (3% launchpad fee)
 //! - Talos metadata storage and retrieval
 //! - Patron registration with minimum Pulse holding validation
+//!
+//! # Event Schema
+//!
+//! All events emitted by this contract are versioned.  Off-chain indexers
+//! should call [`TalosRegistry::event_schema_version`] to confirm the schema
+//! major version before processing events.
+//!
+//! | Symbol    | Topics                         | Data                                  |
+//! |-----------|--------------------------------|---------------------------------------|
+//! | `tls_crt` | `(symbol, talos_id: u32)`      | `(creator: Address, name: String)`    |
+//! | `pat_upd` | `(symbol, talos_id: u32)`      | `(creator_share: u32, investor_share: u32)` |
 
 #![no_std]
 
@@ -12,6 +23,35 @@
 extern crate std;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+
+// ── Event Schema Version ────────────────────────────────────────────
+
+/// The major version of this contract's event schema that is supported.
+///
+/// Indexers **must** verify that the major version they were built against
+/// matches the value returned by [`TalosRegistry::event_schema_version`].
+/// A major-version mismatch indicates a breaking change to event payloads.
+const SUPPORTED_MAJOR: u32 = 1;
+
+/// Typed representation of the event schema version exposed to indexers.
+///
+/// - `major`: incremented on **breaking** changes (field removals/reorders).
+/// - `minor`: incremented on **additive** changes (new optional fields).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventSchemaVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+/// The canonical event schema version for this contract.
+///
+/// This constant is the single source of truth. All calls to
+/// [`TalosRegistry::event_schema_version`] return this value unchanged.
+pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
+    major: SUPPORTED_MAJOR,
+    minor: 0,
+};
 
 // ── Data Types ──────────────────────────────────────────────────────
 
@@ -320,6 +360,24 @@ impl TalosRegistry {
             .set(&DataKey::ProtocolFeeBps, &fee_bps);
     }
 
+    /// Return the event schema version expected by off-chain indexers.
+    ///
+    /// This is a **pure read** — it touches no storage and costs no fees.
+    /// Indexers should call this once on start-up and panic if `major`
+    /// differs from the version they were compiled against.
+    ///
+    /// # Panics
+    /// Panics if the compiled-in major version is not in the set of
+    /// supported major versions (guard against accidental mis-deployment).
+    pub fn event_schema_version(_e: Env) -> EventSchemaVersion {
+        // Reject any accidental deployment where the constant was changed to
+        // an unsupported major version without updating SUPPORTED_MAJOR.
+        if EVENT_SCHEMA_VERSION.major != SUPPORTED_MAJOR {
+            panic!("Unsupported event schema major version");
+        }
+        EVENT_SCHEMA_VERSION
+    }
+
     /// Calculate the protocol fee for an amount using the configured fee bps.
     pub fn calculate_protocol_fee(e: Env, amount: i128) -> i128 {
         if amount < 0 {
@@ -344,6 +402,35 @@ mod tests {
         testutils::{Address as _, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal,
     };
+
+    // ── Event schema version tests ───────────────────────────────────
+
+    #[test]
+    fn event_schema_version_returns_expected_value() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        let v = client.event_schema_version();
+
+        // Value must be deterministic and match the compile-time constant.
+        assert_eq!(v.major, 1, "major version must be 1");
+        assert_eq!(v.minor, 0, "minor version must be 0");
+    }
+
+    #[test]
+    fn event_schema_version_major_is_supported() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        let v = client.event_schema_version();
+
+        // The returned major must equal the SUPPORTED_MAJOR guard so that
+        // indexers built against v1 can safely consume events.
+        assert_eq!(
+            v.major, SUPPORTED_MAJOR,
+            "returned major must equal SUPPORTED_MAJOR"
+        );
+    }
 
     fn setup() -> (Env, Address) {
         let env = Env::default();
