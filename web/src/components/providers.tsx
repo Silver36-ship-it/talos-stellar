@@ -45,6 +45,8 @@ interface WalletContextValue {
   connect: () => Promise<void>;
   disconnect: () => void;
   signTransaction: (xdr: string) => Promise<string>;
+  /** Sign an arbitrary UTF-8 message; returns a base64 ED25519 signature. */
+  signMessage: (message: string) => Promise<string>;
   showWalletModal: boolean;
   setShowWalletModal: (v: boolean) => void;
   selectWallet: (id: string) => Promise<void>;
@@ -57,6 +59,7 @@ const WalletContext = createContext<WalletContextValue>({
   connect: async () => {},
   disconnect: () => {},
   signTransaction: async () => "",
+  signMessage: async () => "",
   showWalletModal: false,
   setShowWalletModal: () => {},
   selectWallet: async () => {},
@@ -105,6 +108,20 @@ export function Providers({ children }: { children: ReactNode }) {
     return signedTxXdr;
   }, []);
 
+  // Wallets return the signature either base64-encoded or as raw bytes
+  // depending on the adapter; normalise to base64 so the server has one shape
+  // to verify against.
+  const signMessage = useCallback(async (message: string): Promise<string> => {
+    const { signedMessage } = await StellarWalletsKit.signMessage(message);
+    if (typeof signedMessage === "string") return signedMessage;
+
+    // Browser-safe base64 — `Buffer` is not available in the client bundle.
+    const bytes = signedMessage as unknown as Uint8Array;
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }, []);
+
   return (
     <WalletContext.Provider
       value={{
@@ -114,6 +131,7 @@ export function Providers({ children }: { children: ReactNode }) {
         connect,
         disconnect,
         signTransaction,
+        signMessage,
         showWalletModal,
         setShowWalletModal,
         selectWallet,
@@ -158,6 +176,7 @@ function WalletModal({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
       onClick={onClose}
+      data-testid="wallet-modal"
     >
       <div
         className="bg-background border border-border w-full max-w-sm mx-4"
@@ -171,6 +190,7 @@ function WalletModal({
           </div>
           <button
             onClick={onClose}
+            data-testid="wallet-modal-close-button"
             className="text-muted hover:text-foreground transition-colors text-lg leading-none"
           >
             ×
@@ -184,6 +204,7 @@ function WalletModal({
               key={w.id}
               onClick={() => handleSelect(w.id)}
               disabled={!!connecting}
+              data-testid={`wallet-option-${w.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
               className="w-full flex items-center gap-3 px-4 py-3 border border-transparent hover:border-accent/40 hover:bg-surface text-left transition-all disabled:opacity-50 group"
             >
               <span className="text-xl w-7 text-center">{w.icon}</span>

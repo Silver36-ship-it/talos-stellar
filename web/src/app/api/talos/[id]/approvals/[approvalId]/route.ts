@@ -2,10 +2,11 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { recordApprovalOnChain } from "@/lib/stellar";
+import { recordApprovalOnChain, verifyStellarSignature } from "@/lib/stellar";
+import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 // PATCH /api/talos/:id/approvals/:approvalId — Approve/reject
-export async function PATCH(
+async function handlePatch(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; approvalId: string }> }
 ) {
@@ -35,7 +36,7 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { status, decidedBy } = body;
+    const { status, decidedBy, signature, message } = body;
 
     if (!status || !["approved", "rejected"].includes(status)) {
       return Response.json(
@@ -47,6 +48,13 @@ export async function PATCH(
     if (!decidedBy) {
       return Response.json(
         { error: "decidedBy (Stellar public key) is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!signature || !message) {
+      return Response.json(
+        { error: "signature and message are required" },
         { status: 400 }
       );
     }
@@ -72,6 +80,14 @@ export async function PATCH(
       );
     }
 
+    const signatureIsValid = await verifyStellarSignature(decidedBy, message, signature);
+    if (!signatureIsValid) {
+      return Response.json(
+        { error: "Signature verification failed for the deciding patron" },
+        { status: 403 }
+      );
+    }
+
     // Record approval decision on Stellar
     const onChainResult = await recordApprovalOnChain(
       approvalId,
@@ -91,8 +107,25 @@ export async function PATCH(
       .where(eq(tlsApprovals.id, approvalId))
       .returning();
 
+    // Fire webhook event (non-blocking)
+    emitWebhookEvent({
+      type: `approval.${status}`,
+      talosId: id,
+      payload: {
+        approvalId,
+        type: existing.type,
+        title: existing.title,
+        amount: existing.amount,
+        status,
+        decidedBy,
+        txHash: approval.txHash,
+      },
+    }).catch(() => {});
+
     return Response.json(approval);
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const PATCH = withTraceContext(handlePatch);

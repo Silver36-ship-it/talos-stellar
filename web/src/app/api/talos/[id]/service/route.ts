@@ -1,16 +1,18 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { verifyAgentApiKey } from "@/lib/auth";
+import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
-import { registerServiceSchema, parseBody } from "@/lib/schemas";
+import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
-export async function GET(
+async function handleGet(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -64,36 +66,41 @@ export async function GET(
 }
 
 // POST /api/talos/:id/service — Submit x402 payment + create commerce job
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    // 1. Authenticate requester TALOS via API key (check early)
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 }
-      );
-    }
-    const apiKeyToken = authHeader.slice(7);
-    const requester = await db
-      .select({ id: tlsTalos.id })
-      .from(tlsTalos)
-      .where(eq(tlsTalos.apiKey, apiKeyToken))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!requester) {
-      return Response.json({ error: "Invalid API key" }, { status: 403 });
-    }
+    // 1. Authenticate requester TALOS via API key (scoped or legacy)
+    // The URL param `id` identifies the service *provider*; the Bearer token
+    // identifies the *requester* (buyer). resolveTalosFromRequest resolves the
+    // caller from their key without requiring a known talosId.
+    const auth = await resolveTalosFromRequest(request, ["commerce:read"]);
+    if (!auth.ok) return auth.response;
+    const requester = { id: auth.talos.id };
 
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
+    // 1c. Validate bid payload if present — only run when client actually sends bid fields.
+    // If bid fields are present but invalid, reject with 400 (never silently fall through).
+    type BidData = { bidPrice?: number; status?: "negotiating" | "counter_offer" };
+    let bidData: BidData = {};
+
+    const hasBidFields = "bidPrice" in requestBody || "status" in requestBody;
+    if (hasBidFields) {
+      const bidValidation = submitBidSchema.safeParse(requestBody);
+      if (!bidValidation.success) {
+        const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+        return Response.json(
+          { error: "Invalid bid payload", issues },
+          { status: 400 }
+        );
+      }
+      bidData = bidValidation.data;
+    }
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
@@ -146,8 +153,9 @@ export async function POST(
       return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
     }
 
-    // 4. Verify x402 payment via facilitator (checks signature, amount, destination)
-    const expectedAmount = String(service.price);
+    // Always verify against the listed service price — bidPrice is stored for negotiation
+    // records only and must not reduce the payment amount until server-side accepted.
+    const expectedAmount = Number(service.price).toFixed(2);
     const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
     if (!verified) {
       return Response.json(
@@ -187,32 +195,36 @@ export async function POST(
 
       // Atomic: job + revenue recorded together — if either fails, both roll back.
       // Payment (on-chain) already happened; DB must not partially record it.
-      const [job] = await db.transaction(async (tx) => {
-        const [job] = await tx
-          .insert(tlsCommerceJobs)
-          .values({
+      const [job] = await withTransactionRetry(
+        async (tx) => {
+          const [job] = await tx
+            .insert(tlsCommerceJobs)
+            .values({
+              talosId: id,
+              requesterTalosId: requester.id,
+              serviceName: service.serviceName,
+              payload: payload ?? undefined,
+              result,
+              paymentSig: paymentToken,
+              txHash,
+              amount: service.price,
+              bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+              status: bidData.status ?? "completed",
+            })
+            .returning();
+
+          await tx.insert(tlsRevenues).values({
             talosId: id,
-            requesterTalosId: requester.id,
-            serviceName: service.serviceName,
-            payload: payload ?? undefined,
-            result,
-            paymentSig: paymentToken,
-            txHash,
             amount: service.price,
-            status: "completed",
-          })
-          .returning();
+            currency: service.currency ?? "USDC",
+            source: "commerce",
+            txHash,
+          });
 
-        await tx.insert(tlsRevenues).values({
-          talosId: id,
-          amount: service.price,
-          currency: service.currency ?? "USDC",
-          source: "commerce",
-          txHash,
-        });
-
-        return [job];
-      });
+          return [job];
+        },
+        { category: "JOB" }
+      );
 
       return Response.json(
         { id: job.id, jobId: job.id, status: "completed", result, txHash },
@@ -232,7 +244,8 @@ export async function POST(
         paymentSig: paymentToken,
         txHash,
         amount: service.price,
-        status: "pending",
+        bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+        status: bidData.status ?? "pending",
       })
       .returning();
 
@@ -252,14 +265,14 @@ export async function POST(
 }
 
 // PUT /api/talos/:id/service — Register or update commerce service (upsert)
-export async function PUT(
+async function handlePut(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["commerce:write"]);
     if (!auth.ok) return auth.response;
 
     const parsed = await parseBody(request, registerServiceSchema);
@@ -327,3 +340,7 @@ export async function PUT(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);
+export const PUT = withTraceContext(handlePut);

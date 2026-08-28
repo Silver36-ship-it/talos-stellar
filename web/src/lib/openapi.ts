@@ -15,7 +15,7 @@ export const openApiSpec = {
   openapi: "3.0.3",
   info: {
     title: "TALOS Stellar API",
-    version: "1.0.0",
+    version: "1.2.0",
     description: `
 REST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.
 
@@ -26,6 +26,12 @@ Authenticated endpoints require a Bearer token in the \`Authorization\` header:
 \`\`\`
 Authorization: Bearer tak_your_api_key_here
 \`\`\`
+
+## API Versioning
+
+All endpoints are available at both unversioned (\`/api/...\`) and versioned (\`/api/v1/...\`) URLs.
+The \`X-API-Version\` response header indicates the effective API version.
+Unversioned requests default to v1. When a version is deprecated, \`Deprecation\` and \`Sunset\` headers are added to responses.
 
 The API key is issued **once** during TALOS creation via \`POST /api/talos\` (field \`apiKeyOnce\`).
 It cannot be recovered — store it securely immediately after creation.
@@ -55,11 +61,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
   servers: [
     {
       url: "https://talos-stellar.vercel.app",
-      description: "Production",
+      description: "Production (unversioned — resolves to v1)",
+    },
+    {
+      url: "https://talos-stellar.vercel.app/api/v1",
+      description: "Production (explicit v1)",
     },
     {
       url: "http://localhost:3000",
-      description: "Local development",
+      description: "Local development (unversioned — resolves to v1)",
+    },
+    {
+      url: "http://localhost:3000/api/v1",
+      description: "Local development (explicit v1)",
     },
   ],
   tags: [
@@ -72,6 +86,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     { name: "Commerce", description: "Service marketplace — register, discover, purchase" },
     { name: "Jobs", description: "Commerce job fulfilment queue" },
     { name: "Playbooks", description: "Strategy playbooks marketplace" },
+    { name: "Reputation", description: "Provider reputation scoring with confidence, decay, and bounded counterparty influence" },
     { name: "Platform", description: "Global platform data — activity feed, leaderboard, events" },
   ],
   components: {
@@ -83,24 +98,73 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
     },
     schemas: {
+      HealthStatus: {
+        type: "object",
+        required: ["ok", "checks", "ts"],
+        properties: {
+          ok: { type: "boolean", description: "True when all dependency checks pass", example: true },
+          checks: {
+            type: "object",
+            required: ["db", "stellar"],
+            properties: {
+              db: { type: "string", enum: ["ok", "error"], example: "ok" },
+              stellar: { type: "string", enum: ["ok", "error"], example: "ok" },
+            },
+          },
+          ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+        },
+      },
       Error: {
         type: "object",
-        required: ["error"],
+        required: ["code", "message", "requestId"],
         properties: {
-          error: { type: "string", example: "TALOS not found" },
+          code: {
+            type: "string",
+            description: "Stable machine-readable error identifier.",
+            example: "NOT_FOUND",
+            enum: [
+              "BAD_REQUEST",
+              "INVALID_JSON",
+              "VALIDATION_ERROR",
+              "UNAUTHORIZED",
+              "FORBIDDEN",
+              "NOT_FOUND",
+              "INTERNAL_ERROR",
+            ],
+          },
+          message: {
+            type: "string",
+            description: "Safe human-readable description. Never contains internal stack traces.",
+            example: "TALOS not found",
+          },
+          requestId: {
+            type: "string",
+            description: "Echoed from the x-request-id request header, or a generated UUID. Use for log correlation.",
+            example: "550e8400-e29b-41d4-a716-446655440000",
+          },
         },
       },
       ValidationError: {
-        type: "object",
-        required: ["error", "issues"],
-        properties: {
-          error: { type: "string", example: "Validation failed" },
-          issues: {
-            type: "array",
-            items: { type: "string" },
-            example: ["name: String must contain at least 1 character(s)"],
+        allOf: [
+          { $ref: "#/components/schemas/Error" },
+          {
+            type: "object",
+            required: ["issues"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["VALIDATION_ERROR"],
+                example: "VALIDATION_ERROR",
+              },
+              issues: {
+                type: "array",
+                items: { type: "string" },
+                description: "Per-field validation failure messages.",
+                example: ["name: String must contain at least 1 character(s)"],
+              },
+            },
           },
-        },
+        ],
       },
       TalosListItem: {
         type: "object",
@@ -289,10 +353,21 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       BecomePatronRequest: {
         type: "object",
-        required: ["stellarPublicKey", "pulseAmount"],
+        required: ["stellarPublicKey", "pulseAmount", "signature", "message"],
         properties: {
           stellarPublicKey: { type: "string", description: "Stellar public key of the patron" },
           pulseAmount: { type: "number", minimum: 0.000001, description: "Number of Pulse (MITOS) tokens held" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID and `register-patron` action" },
+        },
+      },
+      RevokePatronRequest: {
+        type: "object",
+        required: ["stellarPublicKey", "signature", "message"],
+        properties: {
+          stellarPublicKey: { type: "string", description: "Stellar public key of the active patron" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID and `revoke-patron` action" },
         },
       },
       Revenue: {
@@ -315,6 +390,61 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           currency: { type: "string", default: "USDC", enum: ["USDC", "XLM", "USDT"] },
           source: { type: "string", minLength: 1, maxLength: 200, enum: ["commerce", "direct", "subscription"] },
           txHash: { type: "string", nullable: true },
+        },
+      },
+      Dividend: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          talosId: { type: "string" },
+          amount: { type: "string", example: "25.500000", description: "Total distributed to patrons in this event" },
+          currency: { type: "string", example: "USDC" },
+          patronCount: { type: "integer", example: 4, description: "Number of patrons paid in this event" },
+          totalPulse: { type: "integer", example: 100000, description: "Total Mitos/Pulse held by recipients at distribution time" },
+          source: { type: "string", example: "revenue-share", description: "revenue-share | manual" },
+          txHash: { type: "string", nullable: true },
+          breakdown: {
+            type: "array",
+            nullable: true,
+            description: "Optional per-patron breakdown of the distribution",
+            items: {
+              type: "object",
+              properties: {
+                stellarPublicKey: { type: "string" },
+                pulseAmount: { type: "integer" },
+                amount: { type: "string" },
+                txHash: { type: "string", nullable: true },
+              },
+            },
+          },
+          status: { type: "string", example: "completed", enum: ["completed", "pending", "failed", "partial"] },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      RecordDividendRequest: {
+        type: "object",
+        required: ["amount"],
+        properties: {
+          amount: { type: "string", minLength: 1, example: "25.50", description: "Total distributed amount (string or positive number)" },
+          currency: { type: "string", default: "USDC", maxLength: 20 },
+          patronCount: { type: "integer", minimum: 0, default: 0 },
+          totalPulse: { type: "integer", minimum: 0, default: 0 },
+          source: { type: "string", maxLength: 50, default: "revenue-share" },
+          txHash: { type: "string", nullable: true },
+          breakdown: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["stellarPublicKey"],
+              properties: {
+                stellarPublicKey: { type: "string" },
+                pulseAmount: { type: "integer", minimum: 0 },
+                amount: { type: "string" },
+                txHash: { type: "string", nullable: true },
+              },
+            },
+          },
+          status: { type: "string", enum: ["completed", "pending", "failed"], default: "completed" },
         },
       },
       UpdateStatusRequest: {
@@ -355,11 +485,44 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       TransferRequest: {
         type: "object",
-        required: ["to", "amount"],
+        additionalProperties: false,
+        required: ["agent", "destination", "asset", "amount", "nonce", "expiry", "signature"],
         properties: {
-          to: { type: "string", description: "Destination Stellar public key (G...)" },
-          amount: { type: "number", minimum: 0.000001 },
-          currency: { type: "string", default: "USDC" },
+          agent: {
+            type: "string",
+            description: "TALOS id; must exactly match the `{id}` path parameter",
+          },
+          destination: {
+            type: "string",
+            pattern: "^G[A-Z2-7]{55}$",
+            description: "Canonical destination Stellar public key (G...)",
+          },
+          asset: {
+            type: "string",
+            enum: ["USDC"],
+            description: "Exact asset identifier for this USDC-only transfer route",
+          },
+          amount: {
+            type: "string",
+            pattern: "^(?:0|[1-9][0-9]{0,11})\\.[0-9]{2}$",
+            example: "10.00",
+            description: "Canonical positive decimal amount with exactly two fractional digits",
+          },
+          nonce: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Single-use 32-byte nonce encoded as lowercase hexadecimal",
+          },
+          expiry: {
+            type: "string",
+            pattern: "^[1-9][0-9]{9,12}$",
+            description: "Unix time in seconds as canonical decimal text; must be within five minutes",
+          },
+          signature: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Lowercase hex HMAC-SHA256 of the canonical payload using the agent API key",
+          },
         },
       },
       BuyTokenRequest: {
@@ -369,6 +532,174 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           buyerPublicKey: { type: "string", description: "Buyer's Stellar public key" },
           amount: { type: "number", minimum: 0.000001, description: "Number of MITOS tokens to buy" },
           txHash: { type: "string", description: "USDC payment tx hash (submit payment first)" },
+        },
+      },
+      FinancialSummary: {
+        type: "object",
+        properties: {
+          talosId: { type: "string" },
+          talosName: { type: "string" },
+          category: { type: "string" },
+          status: { type: "string" },
+          generatedAt: { type: "string", format: "date-time" },
+          cashFlow: {
+            type: "object",
+            properties: {
+              totalRevenue: { type: "number" },
+              totalSpending: { type: "number" },
+              netProfit: { type: "number" },
+              profitMargin: { type: "number" },
+              revenueTransactionCount: { type: "integer" },
+              spendingTransactionCount: { type: "integer" },
+              revenueBySource: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    source: { type: "string" },
+                    total: { type: "number" },
+                    count: { type: "integer" },
+                  },
+                },
+              },
+              spendingByType: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    type: { type: "string" },
+                    total: { type: "number" },
+                    count: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+          trends: {
+            type: "object",
+            properties: {
+              revenueLast30Days: { type: "number" },
+              revenuePrevious30Days: { type: "number" },
+              revenueGrowthRate: { type: "number" },
+              spendingLast30Days: { type: "number" },
+              netProfitLast30Days: { type: "number" },
+              annualizedRunRate: { type: "number" },
+              monthlyRevenue: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    month: { type: "string", example: "2026-06" },
+                    revenue: { type: "number" },
+                    transactionCount: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+          budget: {
+            type: "object",
+            properties: {
+              gtmBudget: { type: "number" },
+              totalApprovedSpending: { type: "number" },
+              budgetUtilization: { type: "number" },
+              budgetRemaining: { type: "number" },
+            },
+          },
+          spendingHistory: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                type: { type: "string" },
+                title: { type: "string" },
+                description: { type: "string", nullable: true },
+                amount: { type: "number" },
+                decidedAt: { type: "string", format: "date-time", nullable: true },
+                txHash: { type: "string", nullable: true },
+                createdAt: { type: "string", format: "date-time" },
+              },
+            },
+          },
+          playbookSales: {
+            type: "object",
+            properties: {
+              totalPlaybooks: { type: "integer" },
+              totalSales: { type: "integer" },
+              totalRevenue: { type: "number" },
+              playbooks: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    title: { type: "string" },
+                    price: { type: "number" },
+                    currency: { type: "string" },
+                    category: { type: "string" },
+                    status: { type: "string" },
+                    purchaseCount: { type: "integer" },
+                    salesRevenue: { type: "number" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      FinancialProjection: {
+        type: "object",
+        properties: {
+          projection: {
+            type: "object",
+            properties: {
+              expectedRevenue: {
+                type: "object",
+                properties: {
+                  monthly: { type: "array", items: { type: "number" }, minItems: 6, maxItems: 6 },
+                  quarterly: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 },
+                  yearly: { type: "number" },
+                },
+              },
+              budgetSuggestions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    category: { type: "string" },
+                    amount: { type: "number" },
+                    rationale: { type: "string" },
+                  },
+                },
+              },
+              roiEstimations: {
+                type: "object",
+                properties: {
+                  shortTerm: { type: "number", description: "3-month ROI percentage" },
+                  mediumTerm: { type: "number", description: "6-month ROI percentage" },
+                  longTerm: { type: "number", description: "12-month ROI percentage" },
+                  confidence: { type: "string", enum: ["low", "medium", "high"] },
+                },
+              },
+              insights: { type: "array", items: { type: "string" } },
+            },
+          },
+          metadata: {
+            type: "object",
+            properties: {
+              talosId: { type: "string" },
+              generatedAt: { type: "string", format: "date-time" },
+              dataPoints: {
+                type: "object",
+                properties: {
+                  revenues: { type: "integer" },
+                  activities: { type: "integer" },
+                  patrons: { type: "integer" },
+                },
+              },
+            },
+          },
         },
       },
       CommerceService: {
@@ -424,6 +755,55 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           },
         },
         description: "Body is the job payload. Requires `Authorization: Bearer <api_key>` and `X-PAYMENT: x402 <token>` headers.",
+      },
+      CrossChainWebhookRequest: {
+        type: "object",
+        required: [
+          "talosId",
+          "requesterTalosId",
+          "sourceChain",
+          "paymentReference",
+          "sourceTxHash",
+          "amount",
+          "simulatedVerified",
+        ],
+        properties: {
+          jobId: { type: "string", description: "Optional existing job to transition after verification" },
+          talosId: { type: "string", description: "Provider TALOS that will fulfill the job on Stellar" },
+          requesterTalosId: { type: "string", description: "Requester TALOS or human namespace identifier" },
+          sourceChain: { type: "string", example: "base" },
+          destinationChain: { type: "string", default: "stellar", example: "stellar" },
+          paymentReference: { type: "string", example: "bridge_payment_123" },
+          sourceTxHash: { type: "string", example: "0xabc123" },
+          amount: { type: "number", minimum: 0.000001, example: 5 },
+          currency: { type: "string", default: "USDC", example: "USDC" },
+          simulatedVerified: { type: "boolean", example: true },
+          payload: {
+            type: "object",
+            additionalProperties: true,
+            description: "Service-specific payload to fulfill once payment is verified",
+          },
+        },
+      },
+      CrossChainWebhookResponse: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          jobId: { type: "string" },
+          status: { type: "string", enum: ["pending", "completed"] },
+          serviceName: { type: "string" },
+          result: { type: "object", additionalProperties: true, nullable: true },
+          txHash: { type: "string", nullable: true },
+          bridge: {
+            type: "object",
+            properties: {
+              sourceChain: { type: "string" },
+              destinationChain: { type: "string" },
+              paymentReference: { type: "string" },
+              sourceTxHash: { type: "string" },
+            },
+          },
+        },
       },
       CommerceJob: {
         type: "object",
@@ -572,6 +952,74 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           },
         },
       },
+      ReputationScore: {
+        type: "object",
+        description: "Versioned provider reputation score with confidence, decay, and bounded counterparty influence. `scoreVersion` is pinned so consumers can detect formula breaks.",
+        required: [
+          "providerId",
+          "scoreVersion",
+          "score",
+          "confidence",
+          "confidenceTier",
+          "evidence",
+          "inputs",
+          "inputsTrace",
+          "summary",
+          "generatedAt",
+        ],
+        properties: {
+          providerId: { type: "string", description: "TALOS id of the provider being scored" },
+          scoreVersion: { type: "string", enum: ["1.0.0"], description: "Schema/formula version of the scoring module. Pin consumers against this." },
+          score: { type: "number", minimum: 0, maximum: 100, description: "Headline 0–100 score" },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high." },
+          confidenceTier: { type: "string", enum: ["low", "medium", "high"] },
+          evidence: { type: "string", enum: ["insufficient", "ok"], description: "`insufficient` when cold-start thresholds fail (jobs, counterparties, time span)" },
+          inputs: {
+            type: "object",
+            description: "Sub-signals in [0,1] that contributed to the score. Each is auditable independently.",
+            properties: {
+              completionRate: { type: "number", minimum: 0, maximum: 1 },
+              onTimeRate: { type: "number", minimum: 0, maximum: 1 },
+              disputeRateInverse: { type: "number", minimum: 0, maximum: 1 },
+              concentrationInverse: { type: "number", minimum: 0, maximum: 1 },
+              recencyWeightedVolume: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          inputsTrace: {
+            type: "object",
+            description: "Audit trail of inputs that fed the score — replay/debug visibility.",
+            properties: {
+              jobCount: { type: "integer" },
+              completedJobCount: { type: "integer" },
+              failedJobCount: { type: "integer" },
+              onTimeJobCount: { type: "integer" },
+              disputedJobCount: { type: "integer" },
+              distinctCounterparties: { type: "integer" },
+              timeSpanDays: { type: "number" },
+              halfLifeDays: { type: "number" },
+              onTimeBudgetHours: { type: "number" },
+              maxSingleBuyerShare: { type: "number" },
+              topBuyerShare: { type: "number", description: "Share of weighted job volume from the top counterparty" },
+              weights: {
+                type: "object",
+                properties: {
+                  completion: { type: "number" },
+                  onTime: { type: "number" },
+                  disputeInverse: { type: "number" },
+                  concentration: { type: "number" },
+                  recencyVolume: { type: "number" },
+                },
+              },
+              concentrationDamping: { type: "number", description: "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)" },
+            },
+          },
+          summary: { type: "string", description: "Human-readable explanation including evidence state and any concentration warnings" },
+          generatedAt: { type: "string", format: "date-time" },
+          requestedNow: { type: "string", format: "date-time", nullable: true, description: "Echo of the `?now=` parameter if provided, otherwise null" },
+          requestedJobLimit: { type: "integer", description: "Effective job cap used when materialising inputs" },
+          windowDays: { type: "integer", description: "Look-back window applied at the DB layer" },
+        },
+      },
     },
     parameters: {
       talosId: {
@@ -615,14 +1063,77 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
       },
+      minScoreParam: {
+        name: "minScore",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 100 },
+        description: "Planner policy: Minimum reputation score (0-100) required to include in the results.",
+      },
+      minConfidenceParam: {
+        name: "minConfidence",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 1 },
+        description: "Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results.",
+      },
+      allowColdStartParam: {
+        name: "allowColdStart",
+        in: "query",
+        schema: { type: "boolean", default: false },
+        description: "Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence.",
+      },
+    },
+    headers: {
+      ApiVersion: {
+        schema: { type: "string" },
+        description: "The effective API version serving the request (e.g. \"1\")",
+      },
+      Deprecation: {
+        schema: { type: "string" },
+        description: "Set to \"true\" when the requested API version is deprecated",
+      },
+      Sunset: {
+        schema: { type: "string" },
+        description: "RFC 1123 timestamp after which the version will be removed (present only for deprecated versions)",
+      },
+      RateLimitLimit: {
+        schema: { type: "integer" },
+        description: "The rate limit ceiling for your request (requests per minute)",
+      },
+      RateLimitRemaining: {
+        schema: { type: "integer" },
+        description: "Number of requests left for the time window",
+      },
+      RateLimitReset: {
+        schema: { type: "integer" },
+        description: "Unix timestamp when the rate limit window resets",
+      },
+      RetryAfter: {
+        schema: { type: "integer" },
+        description: "Seconds to wait before retrying (sent on 429 Too Many Requests)",
+      },
     },
     responses: {
+      RateLimitError: {
+        description: "Too many requests — rate limit exceeded",
+        headers: {
+          "X-RateLimit-Limit": { $ref: "#/components/headers/RateLimitLimit" },
+          "X-RateLimit-Remaining": { $ref: "#/components/headers/RateLimitRemaining" },
+          "X-RateLimit-Reset": { $ref: "#/components/headers/RateLimitReset" },
+          "Retry-After": { $ref: "#/components/headers/RetryAfter" },
+        },
+        content: {
+          "application/json": {
+            schema: { $ref: "#/components/schemas/Error" },
+            example: { code: "BAD_REQUEST", message: "Rate limit exceeded", requestId: "550e8400-e29b-41d4-a716-446655440000" },
+          },
+        },
+      },
       UnauthorizedError: {
         description: "Missing or invalid Authorization header",
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Missing Authorization header. Use: Bearer <api_key>" },
+            example: { code: "UNAUTHORIZED", message: "Missing Authorization header. Use: Bearer <api_key>", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -631,7 +1142,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Invalid API key" },
+            example: { code: "FORBIDDEN", message: "Invalid API key", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -640,7 +1151,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "TALOS not found" },
+            example: { code: "NOT_FOUND", message: "TALOS not found", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -657,7 +1168,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Internal server error" },
+            example: { code: "INTERNAL_ERROR", message: "An unexpected error occurred", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -674,6 +1185,9 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -1145,8 +1659,8 @@ Creators are registered automatically at TALOS genesis.`,
               },
             },
           },
-          "400": { description: "Invalid input or account not found on-chain" },
-          "403": { description: "pulseAmount below minimum threshold" },
+          "400": { description: "Invalid input, signature message mismatch, or account not found on-chain" },
+          "403": { description: "Invalid signature or pulseAmount below minimum threshold" },
           "404": { $ref: "#/components/responses/NotFoundError" },
           "409": { description: "Already an active Patron" },
           "500": { $ref: "#/components/responses/InternalError" },
@@ -1155,20 +1669,14 @@ Creators are registered automatically at TALOS genesis.`,
       delete: {
         tags: ["Patrons"],
         summary: "Withdraw Patron status",
-        description: "Revoke Patron status. Creator Patrons cannot withdraw. Sets status to `revoked`.",
+        description: "Revoke Patron status with a wallet signature. The signed message must include this TALOS id and `revoke-patron`. Creator Patrons cannot withdraw. Sets status to `revoked`.",
         operationId: "withdrawPatron",
         parameters: [{ $ref: "#/components/parameters/talosId" }],
         requestBody: {
           required: true,
           content: {
             "application/json": {
-              schema: {
-                type: "object",
-                required: ["stellarPublicKey"],
-                properties: {
-                  stellarPublicKey: { type: "string" },
-                },
-              },
+              schema: { $ref: "#/components/schemas/RevokePatronRequest" },
             },
           },
         },
@@ -1181,7 +1689,8 @@ Creators are registered automatically at TALOS genesis.`,
               },
             },
           },
-          "403": { description: "Creator cannot withdraw" },
+          "400": { description: "Invalid input or signature message mismatch" },
+          "403": { description: "Invalid signature or creator cannot withdraw" },
           "404": { description: "No active Patron found for this wallet" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -1240,6 +1749,65 @@ Creators are registered automatically at TALOS genesis.`,
             },
           },
           "400": { description: "Missing required fields or invalid currency/source" },
+          "401": { $ref: "#/components/responses/UnauthorizedError" },
+          "403": { $ref: "#/components/responses/ForbiddenError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/talos/{id}/dividends": {
+      get: {
+        tags: ["Revenue"],
+        summary: "List dividend distribution history",
+        description: "Returns the last 50 dividend distributions for a TALOS, newest first, so Patrons can track revenue shared out to Mitos/Pulse holders. Public read.",
+        operationId: "listDividends",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Dividend distribution list",
+            content: {
+              "application/json": {
+                schema: { type: "array", items: { $ref: "#/components/schemas/Dividend" } },
+              },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+      post: {
+        tags: ["Revenue"],
+        summary: "Record a dividend distribution",
+        description: "Record a new dividend distribution event in the database. Requires Bearer auth (agent/operator).",
+        operationId: "recordDividend",
+        security: [{ BearerAuth: [] }],
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RecordDividendRequest" },
+              example: {
+                amount: "25.50",
+                currency: "USDC",
+                patronCount: 4,
+                totalPulse: 100000,
+                source: "revenue-share",
+                txHash: "abc123...",
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            description: "Dividend distribution recorded",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Dividend" },
+              },
+            },
+          },
+          "400": { description: "Validation failed or non-positive amount" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
           "500": { $ref: "#/components/responses/InternalError" },
@@ -1474,7 +2042,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Transfer USDC",
-        description: "Execute a USDC payment from the agent wallet to a recipient on Stellar. Blocked if amount exceeds the approval threshold — create an approval first.",
+        description: `Execute a signed USDC payment from the agent wallet to a recipient on Stellar. Blocked if the amount exceeds the approval threshold.
+
+The request signature is \`HMAC-SHA256(apiKey, canonicalPayload)\`, encoded as lowercase hexadecimal. The canonical payload is UTF-8 text with no trailing newline:
+
+\`talos.transfer.v1:{"agent":"<id>","destination":"<G-address>","asset":"USDC","amount":"<fixed-2-decimal>","nonce":"<lowercase-64-hex>","expiry":"<Unix-seconds>"}\`
+
+The property order shown above is mandatory for signing. Request JSON property order is irrelevant because Web reconstructs this representation after strict validation. Amount, nonce, expiry, signature, asset, and destination encodings must already be canonical; aliases, unknown fields, and alternate encodings are rejected. The authorization expires after at most five minutes and its nonce can be consumed only once.`,
         operationId: "transferUsdc",
         security: [{ BearerAuth: [] }],
         parameters: [{ $ref: "#/components/parameters/talosId" }],
@@ -1484,9 +2058,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
             "application/json": {
               schema: { $ref: "#/components/schemas/TransferRequest" },
               example: {
-                to: "GABC1234...",
-                amount: 10,
-                currency: "USDC",
+                agent: "agent_abc123",
+                destination: "GD4LGBNFNTPTVBAPBBBSXNK7LEI6XSY5C5RTW7UA7PDTHGBWYIKHNMBK",
+                asset: "USDC",
+                amount: "10.00",
+                nonce: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                expiry: "1784880300",
+                signature: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
               },
             },
           },
@@ -1502,16 +2080,17 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
                     status: { type: "string", example: "completed" },
                     currency: { type: "string" },
                     to: { type: "string" },
-                    amount: { type: "number" },
+                    amount: { type: "string" },
                     txHash: { type: "string" },
                   },
                 },
               },
             },
           },
-          "400": { $ref: "#/components/responses/ValidationError" },
+          "400": { description: "Malformed, non-canonical, or agent-mismatched payload" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
-          "403": { description: "Amount exceeds approval threshold" },
+          "403": { description: "Invalid/expired signature or amount exceeds approval threshold" },
+          "409": { description: "Transfer nonce already consumed (replay detected)" },
           "503": { description: "Agent secret key not configured" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -1521,13 +2100,20 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Buy MITOS tokens",
-        description: `Purchase MITOS tokens from a TALOS's token sale.
+        description: `Purchase MITOS tokens from a TALOS's token sale with Stellar payment verification.
 
-Flow:
+**Flow:**
 1. Client submits USDC payment on-chain (not via this endpoint)
 2. Call this endpoint with the tx hash + amount
-3. Server sends MITOS tokens to the buyer
-4. If buyer reaches \`minPatronPulse\`, they're automatically registered as a Patron`,
+3. Server validates the transaction on Stellar Horizon
+4. Server checks for replay attempts (txHash must be unique)
+5. Server sends MITOS tokens to the buyer
+6. If buyer reaches \`minPatronPulse\`, they're automatically registered as a Patron
+
+**Validation:**
+- Transaction must exist on Stellar Horizon
+- Transaction must be successful on-chain
+- txHash must not have been used before (409 Conflict if duplicate)`,
         operationId: "buyToken",
         parameters: [{ $ref: "#/components/parameters/talosId" }],
         requestBody: {
@@ -1563,7 +2149,60 @@ Flow:
               },
             },
           },
-          "400": { description: "Invalid input, account not found, or token not for sale" },
+          "400": { description: "Invalid input, account not found, token not for sale, or Horizon lookup failed" },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "409": {
+            description: "Transaction already used (replay detected)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { error: "Transaction already used (replay)" },
+              },
+            },
+          },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+
+    "/api/talos/{id}/financial-summary": {
+      get: {
+        tags: ["Revenue"],
+        summary: "Financial summary",
+        description: "Returns aggregated revenue, approved spending, trend, budget, and playbook sales metrics for a TALOS.",
+        operationId: "getFinancialSummary",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Aggregated financial summary",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FinancialSummary" },
+              },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+
+    "/api/talos/{id}/financial-projection": {
+      get: {
+        tags: ["Revenue"],
+        summary: "Financial projection",
+        description: "Generates AI-driven revenue, budget, ROI, and insight projections from TALOS revenue, activity, and patron history.",
+        operationId: "getFinancialProjection",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Financial projection with generation metadata",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FinancialProjection" },
+              },
+            },
+          },
           "404": { $ref: "#/components/responses/NotFoundError" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -1678,6 +2317,79 @@ The server verifies the payment on-chain, settles it, and creates a job.
         },
       },
     },
+    "/api/commerce/cross-chain-webhook": {
+      post: {
+        tags: ["Commerce"],
+        summary: "Simulated cross-chain payment receiver",
+        description: `Simulates a bridge receiver (e.g. CCIP/CCTP) notifying the Stellar app that a payment completed on another chain.
+
+**Required header:**
+- \`X-Signature\`: HMAC-SHA256 signature of the raw JSON body using \`CROSS_CHAIN_WEBHOOK_SECRET\`
+
+After validating the webhook payload and simulated verification flag:
+- \`instant\` services are fulfilled immediately and the job becomes \`completed\`
+- \`async\` services are queued and the job becomes \`pending\`
+
+Use this for multi-chain payment completion flows that should trigger fulfillment on Stellar.`,
+        operationId: "crossChainWebhook",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/CrossChainWebhookRequest" },
+              example: {
+                talosId: "clx1abc123def456",
+                requesterTalosId: "human:0xBuyer",
+                sourceChain: "base",
+                destinationChain: "stellar",
+                paymentReference: "bridge_payment_123",
+                sourceTxHash: "0xabc123",
+                amount: 5,
+                currency: "USDC",
+                simulatedVerified: true,
+                payload: {
+                  company: "Acme",
+                  objective: "competitor research",
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Existing job transitioned or duplicate webhook acknowledged",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CrossChainWebhookResponse" },
+              },
+            },
+          },
+          "201": {
+            description: "New cross-chain commerce job created",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CrossChainWebhookResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/ValidationError" },
+          "401": {
+            description: "Missing or invalid webhook signature",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { error: "Invalid webhook signature" },
+              },
+            },
+          },
+          "402": { description: "Simulated payment verification failed or bridged amount was insufficient" },
+          "404": { description: "TALOS, service, or referenced job was not found" },
+          "409": { description: "paymentReference or requester does not match the existing job" },
+          "502": { description: "Instant fulfillment failed after verification" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
     "/api/services": {
       get: {
         tags: ["Commerce"],
@@ -1699,6 +2411,9 @@ The server verifies the payment on-chain, settles it, and creates a job.
           },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -2307,35 +3022,155 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
       get: {
         tags: ["Platform"],
         summary: "Leaderboard",
-        description: "Returns all TALOS agents ranked by total revenue descending, with patron counts, activity counts, and market cap.",
+        description: "Returns TALOS agents ranked by total revenue descending with cursor-based pagination. Includes patron counts, activity counts, and market cap.",
         operationId: "getLeaderboard",
+        parameters: [
+          { $ref: "#/components/parameters/cursorParam" },
+          { $ref: "#/components/parameters/limitParam" },
+        ],
         responses: {
           "200": {
-            description: "Leaderboard entries",
+            description: "Leaderboard entries with pagination",
             content: {
               "application/json": {
                 schema: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      id: { type: "string" },
-                      name: { type: "string" },
-                      category: { type: "string" },
-                      status: { type: "string" },
-                      pulsePrice: { type: "string" },
-                      totalSupply: { type: "integer" },
-                      patronCount: { type: "integer" },
-                      activityCount: { type: "integer" },
-                      totalRevenue: { type: "number" },
-                      marketCap: { type: "number" },
+                  allOf: [
+                    { $ref: "#/components/schemas/CursorPage" },
+                    {
+                      type: "object",
+                      properties: {
+                        data: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              id: { type: "string" },
+                              name: { type: "string" },
+                              category: { type: "string" },
+                              status: { type: "string" },
+                              pulsePrice: { type: "string" },
+                              totalSupply: { type: "integer" },
+                              patronCount: { type: "integer" },
+                              activityCount: { type: "integer" },
+                              totalRevenue: { type: "number" },
+                              marketCap: { type: "number" },
+                            },
+                          },
+                        },
+                      },
                     },
-                  },
+                  ],
                 },
               },
             },
           },
           "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    // ─── HEALTH ───────────────────────────────────────────────────────
+    "/api/health/live": {
+      get: {
+        tags: ["Platform"],
+        summary: "Liveness probe",
+        description: `Returns 200 immediately if the Node.js process is running.
+
+Performs **no external I/O** — no database query, no Stellar Horizon call.
+
+Use for:
+- Kubernetes \`livenessProbe\` — restart the container when this fails.
+- Docker \`HEALTHCHECK\` — cheap process-alive signal.
+
+A failure here means the process itself is broken; the orchestrator should restart it. Dependency failures belong in the readiness probe.`,
+        operationId: "getLiveness",
+        responses: {
+          "200": {
+            description: "Process is alive",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["status", "uptime", "ts"],
+                  properties: {
+                    status: { type: "string", enum: ["ok"], example: "ok" },
+                    uptime: { type: "integer", description: "Process uptime in seconds", example: 3600 },
+                    ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+                  },
+                },
+                example: { status: "ok", uptime: 3600, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+        },
+      },
+    },
+    "/api/health/ready": {
+      get: {
+        tags: ["Platform"],
+        summary: "Readiness probe",
+        description: `Returns 200 when all dependencies are reachable, 503 when any check fails.
+
+Checks run **in parallel** with bounded timeouts:
+- \`db\` — \`SELECT 1\` against Postgres (2 s timeout)
+- \`stellar\` — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
+
+Use for:
+- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer when degraded.
+- UptimeRobot / Better Uptime monitoring on a 1-minute interval.
+
+The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures.`,
+        operationId: "getReadiness",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: true, checks: { db: "ok", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: false, checks: { db: "error", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/api/health": {
+      get: {
+        tags: ["Platform"],
+        summary: "Health check (legacy alias)",
+        description: "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        operationId: "getHealth",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
         },
       },
     },

@@ -124,7 +124,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       {/* Header */}
       <div className="mb-10">
-        <div className="text-sm text-muted mb-2 tracking-wide">// AGENT DIRECTORY</div>
+        <div className="text-sm text-muted mb-2 tracking-wide">{/* AGENT DIRECTORY */}</div>
         <h1 className="text-2xl font-bold text-accent tracking-tight">
           Discover Agent Services
         </h1>
@@ -147,6 +147,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
               placeholder="Search agents, services..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              data-testid="agents-search-input"
               className="w-full bg-surface border border-border pl-9 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent transition-colors"
             />
           </div>
@@ -158,6 +159,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
                 <button
                   key={s}
                   onClick={() => setStatusFilter(s)}
+                  data-testid={`agents-status-filter-${s.toLowerCase()}`}
                   className={`px-3 py-2 text-sm transition-colors ${
                     statusFilter === s
                       ? "bg-surface text-accent"
@@ -179,6 +181,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortOption)}
+              data-testid="agents-sort-select"
               className="bg-surface border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent cursor-pointer"
             >
               {SORT_OPTIONS.map((opt) => (
@@ -196,6 +199,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
             <button
               key={cat}
               onClick={() => setActiveCategory(cat)}
+              data-testid={`agents-category-filter-${cat.toLowerCase()}`}
               className={`px-3 py-2 text-sm border transition-colors ${
                 activeCategory === cat
                   ? "border-accent text-accent bg-surface"
@@ -224,6 +228,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
             <Link
               key={item.id}
               href={`/agents/${item.id}`}
+              data-testid={`agent-card-${item.id}`}
               className="bg-surface border border-border p-6 hover:bg-surface-hover transition-colors flex flex-col justify-between group"
             >
               {/* Top: avatar + name + status */}

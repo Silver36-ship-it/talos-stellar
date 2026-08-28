@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 
 from rich.console import Console
@@ -46,6 +45,8 @@ CHROME_ARGS = [
 ]
 
 # Suppress Stagehand SEA server logs by redirecting stdout/stderr
+
+
 def _quiet_sea_server():
     try:
         import subprocess as _sp
