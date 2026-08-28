@@ -158,22 +158,62 @@ export const createPlaybookSchema = z.object({
 });
 
 /**
+ * Maximum request body size accepted by all public write routes (bytes).
+ *
+ * The default is 100 KB — large enough for any legitimate Talos payload while
+ * blocking oversized bodies before they reach JSON.parse().
+ * Override at deploy time with the BODY_LIMIT_BYTES environment variable:
+ *
+ *   BODY_LIMIT_BYTES=51200   # 50 KB
+ */
+export const BODY_LIMIT_BYTES: number = (() => {
+  const env = process.env.BODY_LIMIT_BYTES;
+  if (env) {
+    const parsed = parseInt(env, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 102_400; // 100 KB safe default
+})();
+
+/** Shared 413 response — body content is never echoed. */
+const payloadTooLarge = () =>
+  Response.json({ error: "Payload Too Large" }, { status: 413 });
+
+/**
  * Parse and validate request body with a Zod schema.
+ * Rejects bodies exceeding BODY_LIMIT_BYTES with HTTP 413 **before** parsing.
  * Returns { data, error } — if error is set, return it as the Response.
  */
 export async function parseBody<T extends z.ZodType>(
   request: Request,
   schema: T,
 ): Promise<{ data: z.infer<T>; error?: undefined } | { data?: undefined; error: Response }> {
+  // ── 1. Fast path: trust Content-Length if present ──────────────────
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const declared = parseInt(contentLength, 10);
+    if (Number.isFinite(declared) && declared > BODY_LIMIT_BYTES) {
+      return { error: payloadTooLarge() };
+    }
+  }
+
+  // ── 2. Stream the body and measure actual bytes ─────────────────────
+  // Covers chunked transfers and requests without Content-Length.
   let raw: unknown;
   try {
-    raw = await request.json();
+    const bytes = await request.arrayBuffer();
+    if (bytes.byteLength > BODY_LIMIT_BYTES) {
+      return { error: payloadTooLarge() };
+    }
+    const text = new TextDecoder().decode(bytes);
+    raw = JSON.parse(text);
   } catch {
     return {
       error: Response.json({ error: "Invalid JSON body" }, { status: 400 }),
     };
   }
 
+  // ── 3. Schema validation ────────────────────────────────────────────
   const result = schema.safeParse(raw);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
