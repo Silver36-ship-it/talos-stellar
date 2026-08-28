@@ -40,6 +40,7 @@ export function WalletGate({
         <p className="text-sm text-muted mb-8 leading-relaxed">{description}</p>
         <button
           onClick={connect}
+          data-testid="connect-wallet-button"
           className="bg-accent text-background px-8 py-2.5 text-sm font-medium hover:bg-foreground transition-colors"
         >
           Connect Stellar Wallet
@@ -66,6 +67,7 @@ export function ConnectButton({
   return (
     <button
       onClick={connect}
+      data-testid="connect-wallet-button"
       className={`border border-border px-4 py-2 text-sm text-foreground hover:bg-surface-hover transition-colors ${className}`}
     >
       {label}
@@ -74,11 +76,12 @@ export function ConnectButton({
 }
 
 export function useWallet() {
-  const { isConnected, publicKey, connect, signTransaction } = useStellarWallet();
+  const { isConnected, publicKey, connect, signTransaction, signMessage } = useStellarWallet();
   return {
     isConnected,
     address: publicKey,
     connect,
     signTransaction,
+    signMessage,
   };
 }

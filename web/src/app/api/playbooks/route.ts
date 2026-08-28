@@ -2,15 +2,10 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
+import { createPlaybookSchema, parseBody } from "@/lib/schemas";
+import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
-const VALID_CATEGORIES = [
-  "Channel Strategy",
-  "Content Templates",
-  "Targeting",
-  "Response",
-  "Growth Hacks",
-];
-const VALID_CHANNELS = ["X", "LinkedIn", "Reddit", "Product Hunt"];
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
 export async function GET(request: NextRequest) {
@@ -20,7 +15,9 @@ export async function GET(request: NextRequest) {
     const channel = searchParams.get("channel");
     const search = searchParams.get("search");
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const conditions = [eq(tlsPlaybooks.status, "active")];
 
@@ -116,79 +113,35 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 }
-      );
-    }
+    const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
+    if (!auth.ok) return auth.response;
 
-    const token = authHeader.slice(7);
-    const talos = await db
-      .select({ id: tlsTalos.id, apiKey: tlsTalos.apiKey })
-      .from(tlsTalos)
-      .where(eq(tlsTalos.apiKey, token))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!talos) {
-      return Response.json({ error: "Invalid API key" }, { status: 403 });
-    }
-
-    const body = await request.json();
-    const {
-      title,
-      category,
-      channel,
-      description,
-      price,
-      tags,
-      content,
-      impressions,
-      engagementRate,
-      conversions,
-      periodDays,
-    } = body;
-
-    if (!title || !category || !channel || !description || price == null) {
-      return Response.json(
-        { error: "title, category, channel, description, price are required" },
-        { status: 400 }
-      );
-    }
-
-    if (!VALID_CATEGORIES.includes(category)) {
-      return Response.json(
-        { error: `category must be one of: ${VALID_CATEGORIES.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
-    if (!VALID_CHANNELS.includes(channel)) {
-      return Response.json(
-        { error: `channel must be one of: ${VALID_CHANNELS.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
-    if (typeof price !== "number" || price <= 0) {
-      return Response.json(
-        { error: "price must be a positive number" },
-        { status: 400 }
-      );
-    }
+    const { data, error } = await parseBody(request, createPlaybookSchema);
+if (error) return error;
+const {
+  title,
+  category,
+  channel,
+  description,
+  price,
+  tags,
+  content,
+  impressions,
+  engagementRate,
+  conversions,
+  periodDays,
+} = data;
 
     const [playbook] = await db
       .insert(tlsPlaybooks)
       .values({
-        talosId: talos.id,
+        talosId: auth.talos.id,
         title,
         category,
-        channel,
-        description,
+        channel: channel ?? "",
+        description: description ?? "",
         price: String(price),
         tags: tags ?? [],
         content: content ?? null,
@@ -204,3 +157,5 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

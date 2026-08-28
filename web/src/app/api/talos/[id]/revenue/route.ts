@@ -1,17 +1,24 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 // GET /api/talos/:id/revenue — Get revenue history
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const { searchParams } = new URL(request.url);
+  const cursor = searchParams.get("cursor");
+  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 200);
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
+    if (!auth.ok) return auth.response;
+
     const talos = await db
       .select({ id: tlsTalos.id })
       .from(tlsTalos)
@@ -23,14 +30,21 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
-    const revenues = await db
+    const conditions = [eq(tlsRevenues.talosId, id)];
+    if (cursor) conditions.push(sql`${tlsRevenues.createdAt} < ${new Date(cursor)}`);
+
+    const rows = await db
       .select()
       .from(tlsRevenues)
-      .where(eq(tlsRevenues.talosId, id))
+      .where(and(...conditions))
       .orderBy(desc(tlsRevenues.createdAt))
-      .limit(50);
+      .limit(limit + 1);
 
-    return Response.json(revenues);
+    const hasMore = rows.length > limit;
+    const revenues = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? revenues[revenues.length - 1]?.createdAt.toISOString() ?? null : null;
+
+    return Response.json({ revenues, nextCursor });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
@@ -38,14 +52,14 @@ export async function GET(
 
 // POST /api/talos/:id/revenue — Report revenue (from Local Agent)
 // All revenue stays in Agent Treasury. No distribution to external wallets.
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["revenue:write"]);
     if (!auth.ok) return auth.response;
 
     const body = await request.json();
@@ -83,6 +97,9 @@ export async function POST(
     }
 
     // Record revenue in DB — all revenue stays in Agent Treasury
+    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes");
+    if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
+
     const [revenue] = await db
       .insert(tlsRevenues)
       .values({
@@ -94,8 +111,23 @@ export async function POST(
       })
       .returning();
 
+    // Fire webhook event (non-blocking)
+    emitWebhookEvent({
+      type: "revenue.recorded",
+      talosId: id,
+      payload: {
+        revenueId: revenue.id,
+        amount: String(amount),
+        currency: currency ?? "USDC",
+        source,
+        txHash,
+      },
+    }).catch(() => {});
+
     return Response.json(revenue, { status: 201 });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

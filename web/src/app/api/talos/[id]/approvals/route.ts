@@ -1,32 +1,43 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
 // GET /api/talos/:id/approvals — Pending approval list
 // Public read (no auth) — patrons need to see approvals to vote
 // Agent-authenticated write is handled in POST
-export async function GET(
+async function handleGet(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status"); // optional filter: pending | approved | rejected
+  const status = searchParams.get("status");
+  const cursor = searchParams.get("cursor");
+  const parsedLimit = parseLimit(searchParams.get("limit"), 50, 200);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
 
   try {
+    const conditions = [eq(tlsApprovals.talosId, id)];
+    if (status) conditions.push(eq(tlsApprovals.status, status));
+    if (cursor) conditions.push(sql`${tlsApprovals.createdAt} < ${new Date(cursor)}`);
+
     const rows = await db
       .select()
       .from(tlsApprovals)
-      .where(
-        status
-          ? and(eq(tlsApprovals.talosId, id), eq(tlsApprovals.status, status))
-          : eq(tlsApprovals.talosId, id),
-      )
-      .orderBy(desc(tlsApprovals.createdAt));
+      .where(and(...conditions))
+      .orderBy(desc(tlsApprovals.createdAt))
+      .limit(limit + 1);
 
-    return Response.json(rows);
+    const hasMore = rows.length > limit;
+    const approvals = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? approvals[approvals.length - 1]?.createdAt.toISOString() ?? null : null;
+
+    return Response.json({ approvals, nextCursor });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
@@ -34,7 +45,7 @@ export async function GET(
 
 // POST /api/talos/:id/approvals — Create approval request
 // Can be called by: local agent (Bearer api_key) OR active patron (proposerPublicKey)
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -59,7 +70,10 @@ export async function POST(
     const authHeader = request.headers.get("authorization");
     const isAgentAuth = authHeader?.startsWith("Bearer ");
 
-    if (!isAgentAuth) {
+    if (isAgentAuth) {
+      const auth = await verifyAgentApiKey(request, id, ["admin"]);
+      if (!auth.ok) return auth.response;
+    } else {
       if (!proposerPublicKey) {
         return Response.json({ error: "proposerPublicKey required for patron proposals" }, { status: 401 });
       }
@@ -138,3 +152,6 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);
