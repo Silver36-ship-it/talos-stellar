@@ -29,15 +29,19 @@ export const stellarPublicKeySchema = z
     { message: "Invalid Stellar Ed25519 public key" },
   );
 
-export const stellarNativeAssetSchema = z.object({
-  type: z.literal("native"),
-}).strict();
+export const stellarNativeAssetSchema = z
+  .object({
+    type: z.literal("native"),
+  })
+  .strict();
 
-export const stellarIssuedAssetSchema = z.object({
-  type: z.literal("issued"),
-  code: stellarAssetCodeSchema,
-  issuer: stellarPublicKeySchema,
-}).strict();
+export const stellarIssuedAssetSchema = z
+  .object({
+    type: z.literal("issued"),
+    code: stellarAssetCodeSchema,
+    issuer: stellarPublicKeySchema,
+  })
+  .strict();
 
 export const stellarDiscriminatedAssetSchema = z.discriminatedUnion("type", [
   stellarNativeAssetSchema,
@@ -82,7 +86,8 @@ const CRC16_TABLE = (() => {
 
 function crc16(bytes: Uint8Array): number {
   let crc = 0;
-  for (const b of bytes) crc = ((crc << 8) ^ CRC16_TABLE[((crc >>> 8) ^ b) & 0xff]) & 0xffff;
+  for (const b of bytes)
+    crc = ((crc << 8) ^ CRC16_TABLE[((crc >>> 8) ^ b) & 0xff]) & 0xffff;
   return crc;
 }
 
@@ -147,9 +152,13 @@ export const stellarAssetSchema = z.union([
       .string()
       .min(1, "Asset code is required for issued assets")
       .max(12, "Asset code must be at most 12 characters")
-      .regex(/^[A-Z0-9]{1,12}$/, "Asset code must be 1-12 uppercase alphanumeric characters"),
+      .regex(
+        /^[A-Z0-9]{1,12}$/,
+        "Asset code must be 1-12 uppercase alphanumeric characters",
+      ),
     issuer: z.string().refine(isValidStellarPublicKey, {
-      message: "Issuer must be a valid Stellar public key (G..., 56 chars, valid checksum)",
+      message:
+        "Issuer must be a valid Stellar public key (G..., 56 chars, valid checksum)",
     }),
   }),
 ]);
@@ -167,16 +176,32 @@ export const optionalStellarAssetField = stellarAssetSchema.optional();
 // ── Categories ───────────────────────────────────────────────────────────────
 
 export const VALID_CATEGORIES = [
-  "Marketing", "Development", "Research", "Design", "Finance",
-  "Analytics", "Operations", "Sales", "Support", "Education",
+  "Marketing",
+  "Development",
+  "Research",
+  "Design",
+  "Finance",
+  "Analytics",
+  "Operations",
+  "Sales",
+  "Support",
+  "Education",
 ] as const;
 
 const VALID_ACTIVITY_TYPES = [
-  "post", "research", "reply", "engagement", "commerce", "approval",
+  "post",
+  "research",
+  "reply",
+  "engagement",
+  "commerce",
+  "approval",
 ] as const;
 
 const VALID_APPROVAL_TYPES = [
-  "transaction", "strategy", "policy", "channel",
+  "transaction",
+  "strategy",
+  "policy",
+  "channel",
 ] as const;
 
 // --- TALOS ---
@@ -185,7 +210,13 @@ export const createTalosSchema = z.object({
   name: z.string().min(1).max(100),
   category: z.enum(VALID_CATEGORIES),
   description: z.string().min(1).max(2000),
-  totalSupply: z.number().int().positive().max(100_000_000).optional().default(1_000_000),
+  totalSupply: z
+    .number()
+    .int()
+    .positive()
+    .max(100_000_000)
+    .optional()
+    .default(1_000_000),
   persona: z.string().max(2000).optional(),
   targetAudience: z.string().max(2000).optional(),
   channels: z.array(z.string()).optional().default([]),
@@ -200,15 +231,22 @@ export const createTalosSchema = z.object({
   agentName: z.string().max(100).nullable().optional(),
   initialPrice: z.number().nonnegative().optional().default(0),
   minPatronPulse: z.number().int().nonnegative().nullable().optional(),
-  stellarAssetCode: z.string().nullable().optional().refine(
-    (val) => {
-      if (val === null || val === undefined || val === "") return true;
-      const match = val.match(/^([A-Z0-9]{1,12}):(.+)$/);
-      if (!match) return false;
-      return isValidStellarPublicKey(match[2]);
-    },
-    { message: "stellarAssetCode must be null or in the format 'CODE:G...55chars' with a valid issuer checksum (e.g. 'MITOS:GABC...')" },
-  ),
+  stellarAssetCode: z
+    .string()
+    .nullable()
+    .optional()
+    .refine(
+      (val) => {
+        if (val === null || val === undefined || val === "") return true;
+        const match = val.match(/^([A-Z0-9]{1,12}):(.+)$/);
+        if (!match) return false;
+        return isValidStellarPublicKey(match[2]);
+      },
+      {
+        message:
+          "stellarAssetCode must be null or in the format 'CODE:G...55chars' with a valid issuer checksum (e.g. 'MITOS:GABC...')",
+      },
+    ),
   tokenSymbol: z.string().max(20).nullable().optional(),
   serviceName: z.string().min(1).max(200).optional(),
   serviceDescription: z.string().max(2000).optional(),
@@ -244,7 +282,7 @@ export const decideApprovalSchema = z.object({
 // --- Transfer (Stellar USDC) ---
 
 export const transferSchema = z.object({
-  to: z.string().min(1),     // Stellar public key (G...)
+  to: z.string().min(1), // Stellar public key (G...)
   amount: z.number().positive(),
   currency: z.string().optional().default("USDC"),
 });
@@ -294,7 +332,12 @@ export const crossChainWebhookSchema = z.object({
 
 // Full set of statuses used internally / by the server
 export const VALID_BID_STATUSES = [
-  "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
+  "pending",
+  "negotiating",
+  "accepted",
+  "counter_offer",
+  "rejected",
+  "completed",
 ] as const;
 
 // Only these statuses may be submitted by a client in a bid payload.
@@ -334,7 +377,10 @@ export const recordDividendSchema = z.object({
   source: z.string().max(50).optional().default("revenue-share"),
   txHash: z.string().nullable().optional(),
   breakdown: z.array(dividendBreakdownEntrySchema).optional(),
-  status: z.enum(["completed", "pending", "failed"]).optional().default("completed"),
+  status: z
+    .enum(["completed", "pending", "failed"])
+    .optional()
+    .default("completed"),
 });
 
 // --- Status ---
@@ -381,7 +427,7 @@ export const signPaymentSchema = z.object({
 // --- Buy Token ---
 
 export const buyTokenSchema = z.object({
-  buyerPublicKey: z.string().min(1),     // Stellar public key
+  buyerPublicKey: z.string().min(1), // Stellar public key
   amount: z.number().positive(),
 });
 
@@ -405,9 +451,16 @@ export const createPlaybookSchema = z.object({
 // --- API Key Management ---
 
 const VALID_SCOPE_VALUES = [
-  "admin", "activity:write", "commerce:read", "commerce:write",
-  "wallet:read", "wallet:sign", "settings:read", "settings:write",
-  "revenue:read", "revenue:write",
+  "admin",
+  "activity:write",
+  "commerce:read",
+  "commerce:write",
+  "wallet:read",
+  "wallet:sign",
+  "settings:read",
+  "settings:write",
+  "revenue:read",
+  "revenue:write",
 ] as const;
 
 export const createApiKeySchema = z.object({
@@ -423,17 +476,56 @@ export const updateApiKeySchema = z.object({
 });
 
 /**
+ * Maximum request size accepted by shared JSON parsers.
+ *
+ * Contract:
+ * - Value is measured in bytes.
+ * - It is enforced before JSON parsing so oversized payloads never reach Zod.
+ * - `Content-Length` is treated as a fast pre-check, but the actual body length
+ *   is always re-checked from the stream before parsing.
+ * - Requests exceeding this limit return HTTP 413 with a safe payload error and
+ *   no echoed request body.
+ *
+ * This constant is configurable via the `BODY_LIMIT_BYTES` environment variable
+ * at build time. If omitted, the default is 1 MiB.
+ */
+export const BODY_LIMIT_BYTES = Number(
+  process.env.BODY_LIMIT_BYTES ?? 1_048_576,
+);
+
+function payloadTooLarge(): Response {
+  return Response.json({ error: "Payload Too Large" }, { status: 413 });
+}
+
+/**
  * Parse and validate request body with a Zod schema.
  * Returns { data, error } — if error is set, return it as the Response.
  *
  * Error responses use the standardised envelope from @/lib/api-response
- * so callers never need to import that module separately.
+ * for 400-level validation failures, but oversized JSON bodies are rejected
+ * earlier with the dedicated 413 payload guard.
  */
 export async function parseBody<T extends z.ZodType>(
   request: Request,
   schema: T,
-): Promise<{ data: z.infer<T>; error?: undefined } | { data?: undefined; error: Response }> {
+): Promise<
+  | { data: z.infer<T>; error?: undefined }
+  | { data?: undefined; error: Response }
+> {
   const { invalidJson, validationError } = await import("@/lib/api-response");
+
+  const declaredLengthHeader = request.headers.get("content-length");
+  if (declaredLengthHeader) {
+    const declaredLength = Number(declaredLengthHeader);
+    if (Number.isFinite(declaredLength) && declaredLength > BODY_LIMIT_BYTES) {
+      return { error: payloadTooLarge() };
+    }
+  }
+
+  const bodyBytes = await request.clone().arrayBuffer();
+  if (bodyBytes.byteLength > BODY_LIMIT_BYTES) {
+    return { error: payloadTooLarge() };
+  }
 
   let raw: unknown;
   try {
@@ -444,7 +536,9 @@ export async function parseBody<T extends z.ZodType>(
 
   const result = schema.safeParse(raw);
   if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    const issues = result.error.issues.map(
+      (i) => `${i.path.join(".")}: ${i.message}`,
+    );
     return { error: validationError(request, issues) };
   }
 
