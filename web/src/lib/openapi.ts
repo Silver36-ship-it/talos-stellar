@@ -910,11 +910,12 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       CursorPage: {
         type: "object",
+        required: ["nextCursor"],
         properties: {
           nextCursor: {
             type: "string",
             nullable: true,
-            description: "Opaque cursor for the next page. Pass as `cursor` query param.",
+            description: "Opaque cursor for the next page. Pass as `cursor` query param. Will be null if there are no more pages (final page).",
           },
         },
       },
@@ -1055,13 +1056,25 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         name: "cursor",
         in: "query",
         schema: { type: "string" },
-        description: "Opaque pagination cursor returned from the previous page's `nextCursor`",
+        description: "Opaque pagination cursor returned from the previous page's `nextCursor`. Malformed cursors are rejected with a 400 validation error. Only compatible with the default `createdAt` descending sort.",
       },
       limitParam: {
         name: "limit",
         in: "query",
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
+      },
+      sortParam: {
+        name: "sort",
+        in: "query",
+        schema: { type: "string" },
+        description: "Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`.",
+      },
+      directionParam: {
+        name: "direction",
+        in: "query",
+        schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
+        description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
       },
       minScoreParam: {
         name: "minScore",
@@ -1199,6 +1212,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
                     { $ref: "#/components/schemas/CursorPage" },
                     {
                       type: "object",
+                      required: ["data"],
                       properties: {
                         data: {
                           type: "array",
@@ -1211,6 +1225,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
               },
             },
           },
+          "400": { $ref: "#/components/responses/ValidationError" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2239,13 +2254,32 @@ The property order shown above is mandatory for signing. Request JSON property o
 - \`Authorization: Bearer <api_key>\` — buyer agent's API key
 - \`X-PAYMENT: x402 <token>\` — signed payment token from \`POST /api/talos/{buyerId}/sign\`
 
+**Optional header:**
+- \`Idempotency-Key\` — opaque string (UUID recommended, max 128 bytes) for safe retry. Scoped per buyer and service.
+
 The server verifies the payment on-chain, settles it, and creates a job.
 
 - \`instant\` mode: returns the result synchronously
-- \`async\` mode: returns a \`pending\` job — poll \`GET /api/jobs/{id}/result\``,
+- \`async\` mode: returns a \`pending\` job — poll \`GET /api/jobs/{id}/result\`
+
+**Idempotency contract:**
+- No header → request is processed normally (backward compatible).
+- New key → job is created, response cached. \`X-Idempotent-Replayed: false\`.
+- Same key + same payload → original cached 201 response returned. \`X-Idempotent-Replayed: true\`.
+- Same key + different payload → 409 Conflict.
+- Concurrent requests with same key → 409 "already being processed".`,
         operationId: "purchaseService",
         security: [{ BearerAuth: [] }],
-        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        parameters: [
+          { $ref: "#/components/parameters/talosId" },
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            schema: { type: "string", maxLength: 128 },
+            description: "Opaque idempotency key for safe retry (UUID recommended). Scoped per buyer and service.",
+          },
+        ],
         requestBody: {
           content: {
             "application/json": {
@@ -2256,17 +2290,27 @@ The server verifies the payment on-chain, settles it, and creates a job.
         responses: {
           "201": {
             description: "Job created",
+            headers: {
+              "Idempotency-Key": {
+                schema: { type: "string" },
+                description: "Echoes the idempotency key (if provided)",
+              },
+              "X-Idempotent-Replayed": {
+                schema: { type: "string", enum: ["true", "false"] },
+                description: "Whether this response was served from the idempotency cache",
+              },
+            },
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/CommerceJob" },
               },
             },
           },
-          "400": { description: "Missing X-PAYMENT header" },
+          "400": { description: "Missing X-PAYMENT header or Idempotency-Key too large" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
           "402": { description: "Invalid or insufficient x402 payment" },
           "404": { description: "No service registered for this TALOS" },
-          "409": { description: "Payment token already used (replay detected)" },
+          "409": { description: "Payment token already used, idempotency key reused with different payload, or request in progress" },
           "502": { description: "On-chain payment settlement or fulfillment failed" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -2394,7 +2438,9 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: "Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.",
+        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`.
+
+Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
         parameters: [
           {
@@ -2409,6 +2455,8 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
           },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
           { $ref: "#/components/parameters/minScoreParam" },
@@ -2449,6 +2497,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2627,7 +2676,9 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
       get: {
         tags: ["Playbooks"],
         summary: "List playbooks",
-        description: "Returns active playbooks with optional filters. Supports cursor pagination.",
+        description: `Returns active playbooks with optional filters and cursor pagination.
+
+Supports \`sort\` (\`createdAt\`, \`price\`, or \`title\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "listPlaybooks",
         parameters: [
           {
@@ -2649,6 +2700,8 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
             schema: { type: "string" },
             description: "Full-text search in title, description, and tags",
           },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
         ],
@@ -2671,6 +2724,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
