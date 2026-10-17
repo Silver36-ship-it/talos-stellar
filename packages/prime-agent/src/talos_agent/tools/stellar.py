@@ -9,6 +9,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from talos_agent.payments.stellar_kit import StellarKit
+from talos_agent.payments.stellar_retry import (
+    attach_stellar_failure,
+    classify_stellar_failure,
+    classify_stellar_result,
+)
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -35,7 +40,7 @@ async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict
 
     # Check threshold
     threshold = float(_settings.approval_threshold)
-    if amount >= threshold:
+    if amount > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",
@@ -89,7 +94,7 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
     total_amount = sum(r.get("amount", 0) for r in recipient_list)
     threshold = float(_settings.approval_threshold)
 
-    if total_amount >= threshold:
+    if total_amount > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",
@@ -112,6 +117,10 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
             res = await _api.request_transfer(
                 to_account=acct, amount=amt, currency="native", token_id=token_id
             )
+            failure = classify_stellar_result(res)
+            if failure is not None:
+                # Surface a bounded classification instead of raw server text.
+                res = attach_stellar_failure(res, failure)
             results.append({"account": acct, "amount": amt, "result": res})
     return {"status": "completed", "transfers": results}
 
@@ -124,9 +133,14 @@ async def execute_approved_transfer(to_account: str, amount: float, currency: st
         currency=currency,
         token_id=token_id or None,
     )
-    if result and "error" not in result:
+    failure = classify_stellar_result(result)
+    if failure is not None:
+        # Retryable / indeterminate / terminal metadata is additive; ``error``
+        # carries a privacy-safe message rather than raw upstream text.
+        return attach_stellar_failure(result, failure)
+    if result:
         return {"status": "completed", "to": to_account, "amount": amount, "result": result}
-    return result or {"error": "Transfer execution failed"}
+    return attach_stellar_failure(None, classify_stellar_failure())
 
 
 @tool("get_pulse_balance", "Check Pulse token balance for a specific Stellar G... account via Horizon")

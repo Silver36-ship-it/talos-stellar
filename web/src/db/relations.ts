@@ -5,11 +5,17 @@ import {
   tlsActivities,
   tlsApprovals,
   tlsRevenues,
+  tlsDividends,
   tlsCommerceServices,
   tlsCommerceJobs,
   tlsPlaybooks,
   tlsPlaybookPurchases,
   tlsApiAuditLogs,
+  tlsTokenPurchases,
+  tlsBenchmarkRuns,
+  tlsBenchmarkResults,
+  tlsWebhookSubscriptions,
+  tlsWebhookDeliveries,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -17,10 +23,14 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   activities: many(tlsActivities),
   approvals: many(tlsApprovals),
   revenues: many(tlsRevenues),
+  dividends: many(tlsDividends),
   commerceServices: one(tlsCommerceServices),
   commerceJobs: many(tlsCommerceJobs),
   playbooks: many(tlsPlaybooks),
   auditLogs: many(tlsApiAuditLogs),
+  tokenPurchases: many(tlsTokenPurchases),
+  webhookSubscriptions: many(tlsWebhookSubscriptions),
+  webhookDeliveries: many(tlsWebhookDeliveries),
 }));
 
 export const patronRelations = relations(tlsPatrons, ({ one }) => ({
@@ -37,6 +47,10 @@ export const approvalRelations = relations(tlsApprovals, ({ one }) => ({
 
 export const revenueRelations = relations(tlsRevenues, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsRevenues.talosId], references: [tlsTalos.id] }),
+}));
+
+export const dividendRelations = relations(tlsDividends, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsDividends.talosId], references: [tlsTalos.id] }),
 }));
 
 export const commerceServiceRelations = relations(tlsCommerceServices, ({ one }) => ({
@@ -58,4 +72,28 @@ export const playbookPurchaseRelations = relations(tlsPlaybookPurchases, ({ one 
 
 export const apiAuditLogRelations = relations(tlsApiAuditLogs, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsApiAuditLogs.talosId], references: [tlsTalos.id] }),
+}));
+
+export const tokenPurchaseRelations = relations(tlsTokenPurchases, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsTokenPurchases.talosId], references: [tlsTalos.id] }),
+}));
+
+export const benchmarkRunRelations = relations(tlsBenchmarkRuns, ({ many }) => ({
+  results: many(tlsBenchmarkResults),
+}));
+
+export const benchmarkResultRelations = relations(tlsBenchmarkResults, ({ one }) => ({
+  run: one(tlsBenchmarkRuns, { fields: [tlsBenchmarkResults.runId], references: [tlsBenchmarkRuns.id] }),
+}));
+
+export const webhookSubscriptionRelations = relations(tlsWebhookSubscriptions, ({ one, many }) => ({
+  talos: one(tlsTalos, { fields: [tlsWebhookSubscriptions.talosId], references: [tlsTalos.id] }),
+  deliveries: many(tlsWebhookDeliveries),
+}));
+
+export const webhookDeliveryRelations = relations(tlsWebhookDeliveries, ({ one }) => ({
+  subscription: one(tlsWebhookSubscriptions, {
+    fields: [tlsWebhookDeliveries.subscriptionId],
+    references: [tlsWebhookSubscriptions.id],
+  }),
 }));

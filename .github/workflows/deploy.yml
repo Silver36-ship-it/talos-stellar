@@ -12,12 +12,48 @@ on:
       - 'web/**'
       - 'packages/sdk/**'
 
+permissions:
+  contents: read
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: web
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: talos_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_test
+      STELLAR_NETWORK: testnet
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+      NEXT_PUBLIC_STELLAR_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+      STELLAR_OPERATOR_SECRET_KEY: SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      # Transactional outbox (web/OUTBOX.md) — enabled in CI so
+      # tests/outbox-e2e.test.ts exercises the real write -> lease ->
+      # dispatch round trip, not just the disabled-by-default no-op path.
+      OUTBOX_ENABLED: "true"
+      ADMIN_API_KEY: ci-test-admin-key
+      OUTBOX_DISPATCH_SECRET: ci-test-outbox-dispatch-secret
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +64,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.0.0
           run_install: false
 
       - name: Get pnpm store directory
@@ -49,6 +85,34 @@ jobs:
 
       - name: Lint
         run: pnpm lint
+
+      - name: Run database migrations
+        run: pnpm db:migrate
+
+      - name: Start Next.js development server
+        run: pnpm dev > next-dev.log 2>&1 &
+
+      - name: Wait for server to start
+        run: |
+          for i in {1..60}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health | grep -qE "200|503"; then
+              echo "Server is up!"
+              exit 0
+            fi
+            echo "Waiting for server to start..."
+            sleep 2
+          done
+          echo "Server failed to start! Printing logs:"
+          cat next-dev.log
+          exit 1
+        shell: bash
+
+      - name: Test
+        working-directory: web
+        run: pnpm test --run
+
+      - name: Coverage check
+        run: pnpm test --coverage --run
 
       # Deploy to Vercel (main branch only, using Vercel CLI)
       - name: Install Vercel CLI

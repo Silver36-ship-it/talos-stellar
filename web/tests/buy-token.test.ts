@@ -1,6 +1,7 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { POST } from "../src/app/api/talos/[id]/buy-token/route";
 import { Keypair, Asset, TransactionBuilder, Operation, Networks, Account } from "@stellar/stellar-sdk";
+import { OPERATOR_PUBLIC_KEY } from "../src/lib/stellar-config";
 
 // Use vi.hoisted to declare mock functions so they are hoisted along with the vi.mock calls,
 // preventing any TypeScript linting or execution scoping warnings.
@@ -13,12 +14,20 @@ const mocks = vi.hoisted(() => {
     })),
   }));
 
+  const mockTransaction = vi.fn(async (cb: (tx: any) => Promise<any>) => {
+    return cb({
+      insert: (...a: any[]) => mocks.mockInsert(...a),
+      update: (...a: any[]) => mocks.mockUpdate(...a),
+    });
+  });
+
   return {
     mockFindFirstTalos: vi.fn(),
-    mockFindFirstRevenue: vi.fn(),
+    mockFindFirstTokenPurchase: vi.fn(),
     mockFindFirstPatrons: vi.fn(),
     mockInsert: vi.fn(),
     mockUpdate: vi.fn(),
+    mockTransaction,
     mockGetAccountInfo: vi.fn(),
     mockGetNetworkPassphrase: vi.fn(() => "Test SDF Network ; September 2015"),
     mockGetUSDCIssuer: vi.fn(() => "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"),
@@ -30,10 +39,11 @@ const mocks = vi.hoisted(() => {
 
 const {
   mockFindFirstTalos,
-  mockFindFirstRevenue,
+  mockFindFirstTokenPurchase,
   mockFindFirstPatrons,
   mockInsert,
   mockUpdate,
+  mockTransaction,
   mockGetAccountInfo,
   mockGetNetworkPassphrase,
   mockGetUSDCIssuer,
@@ -49,8 +59,8 @@ vi.mock("@/db", () => {
         tlsTalos: {
           findFirst: (...args: any[]) => mocks.mockFindFirstTalos(...args),
         },
-        tlsRevenues: {
-          findFirst: (...args: any[]) => mocks.mockFindFirstRevenue(...args),
+        tlsTokenPurchases: {
+          findFirst: (...args: any[]) => mocks.mockFindFirstTokenPurchase(...args),
         },
         tlsPatrons: {
           findFirst: (...args: any[]) => mocks.mockFindFirstPatrons(...args),
@@ -58,6 +68,7 @@ vi.mock("@/db", () => {
       },
       insert: (...args: any[]) => mocks.mockInsert(...args),
       update: (...args: any[]) => mocks.mockUpdate(...args),
+      transaction: (cb: any) => mocks.mockTransaction(cb),
     },
   };
 });
@@ -65,8 +76,8 @@ vi.mock("@/db", () => {
 vi.mock("@/lib/stellar", () => {
   return {
     getAccountInfo: (...args: any[]) => mocks.mockGetAccountInfo(...args),
-    getNetworkPassphrase: (...args: any[]) => mocks.mockGetNetworkPassphrase(...args),
-    getUSDCIssuer: (...args: any[]) => mocks.mockGetUSDCIssuer(...args),
+            getNetworkPassphrase: () => mocks.mockGetNetworkPassphrase(),
+    getUSDCIssuer: () => mocks.mockGetUSDCIssuer(),
   };
 });
 
@@ -89,7 +100,7 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
 });
 
 describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
-  const operatorTreasury = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+  const operatorTreasury = OPERATOR_PUBLIC_KEY;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,14 +115,28 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
   });
 
   it("returns 409 Conflict if txHash has already been processed (duplicate/replay)", async () => {
-    // Mock existing revenue record with the same txHash
+    // Mock existing purchase record with the same txHash (status=completed)
     mockFindFirstTalos.mockResolvedValue({
       id: "agent-id",
       pulsePrice: "1.0",
     });
-    mockFindFirstRevenue.mockResolvedValue({
-      id: "rev-123",
+    mockFindFirstTokenPurchase.mockResolvedValue({
       txHash: "duplicate-tx-hash",
+      status: "completed",
+      responseBody: {
+        success: true,
+        txHash: "duplicate-tx-hash",
+        mitosTxHash: null,
+        tokenSymbol: "MITOS",
+        amount: 10,
+        pricePerToken: 1.0,
+        totalCost: 10,
+        currency: "USDC",
+        buyerPublicKey: "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+        totalPulseHeld: 10,
+        patronStatus: "pending (need 90 more MITOS)",
+        message: "Successfully purchased 10 MITOS for 10.00 USDC",
+      },
     });
 
     const request = new Request("http://localhost/api/talos/agent-id/buy-token", {
@@ -128,8 +153,13 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     const response = await POST(request, { params });
     const body = await response.json();
 
-    expect(response.status).toBe(409);
-    expect(body.error).toContain("replay");
+    // Returns 200 with cached response (idempotent replay, not an error)
+    expect(response.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.txHash).toBe("duplicate-tx-hash");
+    // No Horizon call or DB writes
+    expect(mockTransactionCall).not.toHaveBeenCalled();
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 
   it("returns 400 Bad Request if transaction is not found on Horizon", async () => {
@@ -137,7 +167,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       id: "agent-id",
       pulsePrice: "1.0",
     });
-    mockFindFirstRevenue.mockResolvedValue(null);
+    mockFindFirstTokenPurchase.mockResolvedValue(null);
 
     // Mock Horizon call throwing an error (transaction not found)
     mockTransactionCall.mockRejectedValue(new Error("Horizon error: 404 Not Found"));
@@ -165,7 +195,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       id: "agent-id",
       pulsePrice: "1.0",
     });
-    mockFindFirstRevenue.mockResolvedValue(null);
+    mockFindFirstTokenPurchase.mockResolvedValue(null);
 
     mockTransactionCall.mockResolvedValue({
       successful: false,
@@ -195,7 +225,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       id: "agent-id",
       pulsePrice: "1.0",
     });
-    mockFindFirstRevenue.mockResolvedValue(null);
+    mockFindFirstTokenPurchase.mockResolvedValue(null);
 
     // Build a transaction signed by a different key than the claimed buyerPublicKey
     const buyerKeypair = Keypair.random();
@@ -248,7 +278,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       id: "agent-id",
       pulsePrice: "1.0",
     });
-    mockFindFirstRevenue.mockResolvedValue(null);
+    mockFindFirstTokenPurchase.mockResolvedValue(null);
 
     const buyerKeypair = Keypair.random();
     const buyerPublicKey = buyerKeypair.publicKey();
@@ -305,7 +335,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       tokenSymbol: "MITOS",
     };
     mockFindFirstTalos.mockResolvedValue(mockTalos);
-    mockFindFirstRevenue.mockResolvedValue(null);
+    mockFindFirstTokenPurchase.mockResolvedValue(null);
     mockFindFirstPatrons.mockResolvedValue(null);
 
     mockGetAccountInfo.mockResolvedValue({
@@ -328,7 +358,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     })
       .addOperation(
         Operation.payment({
-          destination: "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL",
+          destination: operatorTreasury,
           asset: usdcAsset,
           amount: "5.0000000",
         })
