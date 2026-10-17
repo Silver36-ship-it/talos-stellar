@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { calculateMarketCap } from "@/lib/market-cap";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 export async function GET(request: NextRequest) {
@@ -85,7 +86,7 @@ export async function GET(request: NextRequest) {
       patronCount: c.patronCount ?? 0,
       activityCount: c.activityCount ?? 0,
       totalRevenue: c.totalRevenue ?? 0,
-      marketCap: Number(c.pulsePrice) * c.totalSupply,
+      marketCap: calculateMarketCap(c.pulsePrice, c.totalSupply),
     }));
 
     const lastItem = page[page.length - 1];
